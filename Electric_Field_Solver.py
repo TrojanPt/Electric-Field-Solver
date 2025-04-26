@@ -709,7 +709,9 @@ def generate_collocation_points(
             
             # 生成球体附近的点 ##############################################
             
-            near_radius = radius * (1 + 0.05)  # 增加5%的半径
+            # 随机的扩展系数 0.01-0.05
+            near_factors = torch.FloatTensor(n_boundary_per_conductor).uniform_(0.01, 0.05)
+            near_radius = radius * (1 + near_factors)
             
             x_near = center[0] + near_radius * torch.sin(theta) * torch.cos(phi)
             y_near = center[1] + near_radius * torch.sin(theta) * torch.sin(phi)
@@ -767,7 +769,9 @@ def generate_collocation_points(
             # 生成圆柱体附近的点 ##############################################
 
             # 侧面附近点
-            near_radius = radius * (1 + 0.05)  # 增加5%的半径
+            # 扩展半径 radius * 0.01-0.05
+            side_near_factors = torch.FloatTensor(n_side).uniform_(0.01, 0.05)
+            near_radius = radius * (1 + side_near_factors)
             
             x_near_side = center[0] + near_radius * torch.cos(theta)
             y_near_side = center[1] + near_radius * torch.sin(theta)
@@ -776,10 +780,13 @@ def generate_collocation_points(
             near_side_points = torch.stack([x_near_side, y_near_side, z_near_side], dim=1)
             
             # 顶面和底面附近点
-            z_near_top = torch.full_like(x_top, center[2] + half_height + 0.05 * radius)
+            # 扩展高 height * 0.01-0.05
+            top_near_factors = torch.FloatTensor(n_per_cap).uniform_(0.01, 0.05)
+            z_near_top = torch.full_like(x_top, center[2] + half_height) + height * top_near_factors
             near_top_points = torch.stack([x_top, y_top, z_near_top], dim=1)
             
-            z_near_bottom = torch.full_like(x_bottom, center[2] - half_height - 0.05 * radius)
+            bottom_near_factors = torch.FloatTensor(n_per_cap).uniform_(0.01, 0.05)
+            z_near_bottom = torch.full_like(x_bottom, center[2] - half_height) - height * bottom_near_factors
             near_bottom_points = torch.stack([x_bottom, y_bottom, z_near_bottom], dim=1)
             
             cylinder_near_boundary = torch.cat([near_side_points, near_top_points, near_bottom_points], dim=0)
@@ -836,29 +843,35 @@ def generate_collocation_points(
             # 生成立方体附近的点 ##############################################
             near_faces = []
             
-            # 为每个面生成近边界点
-
-            offset = 0.05 * min(a, b, c)  # 使用最小线度的5%作为偏移量
             
             # x方向近边界点
-            x_pos_near = torch.full_like(y_face, half_a + offset)
-            x_neg_near = torch.full_like(y_face, -half_a - offset)
+            # 随机偏移
+            x_pos_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            x_neg_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            x_pos_near = torch.full_like(y_face, half_a) + a * x_pos_factors
+            x_neg_near = torch.full_like(y_face, -half_a) - a * x_neg_factors
             
             face_x_pos_near = torch.stack([x_pos_near, y_face, z_face], dim=1) + center
             face_x_neg_near = torch.stack([x_neg_near, y_face, z_face], dim=1) + center
             near_faces.extend([face_x_pos_near, face_x_neg_near])
             
             # y方向近边界点
-            y_pos_near = torch.full_like(x_face, half_b + offset)
-            y_neg_near = torch.full_like(x_face, -half_b - offset)
+            # 随机偏移
+            y_pos_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            y_neg_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            y_pos_near = torch.full_like(x_face, half_b) + b * y_pos_factors
+            y_neg_near = torch.full_like(x_face, -half_b) - b * y_neg_factors
             
             face_y_pos_near = torch.stack([x_face, y_pos_near, z_face_y], dim=1) + center
             face_y_neg_near = torch.stack([x_face, y_neg_near, z_face_y], dim=1) + center
             near_faces.extend([face_y_pos_near, face_y_neg_near])
             
             # z方向近边界点
-            z_pos_near = torch.full_like(x_face_z, half_c + offset)
-            z_neg_near = torch.full_like(x_face_z, -half_c - offset)
+            # 随机偏移
+            z_pos_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            z_neg_factors = torch.FloatTensor(points_per_face_cube).uniform_(0.01, 0.05)
+            z_pos_near = torch.full_like(x_face_z, half_c) + c * z_pos_factors
+            z_neg_near = torch.full_like(x_face_z, -half_c) - c * z_neg_factors
             
             face_z_pos_near = torch.stack([x_face_z, y_face_z, z_pos_near], dim=1) + center
             face_z_neg_near = torch.stack([x_face_z, y_face_z, z_neg_near], dim=1) + center
@@ -879,9 +892,10 @@ def generate_collocation_points(
 def train_pinn(
         model: ElectricPotentialNN,
         field: Field,
-        n_epochs:int = 10000, 
-        lr:int = 0.001, 
-        comp_domain:tuple = (-10, 10, -10, 10, -10, 10),
+        n_rounds: int = 10,
+        iters_per_round: int = 1000,
+        lr: float = 0.001, 
+        comp_domain: tuple = (-10, 10, -10, 10, -10, 10),
         w_pde: float = 1.0,
         w_far: float = 10.0,
         w_conductor: float = 10.0
@@ -892,7 +906,8 @@ def train_pinn(
     Args:
         model: PINN模型
         field: 电场与导体设置
-        n_epochs: 训练迭代次数
+        n_rounds: 训练轮数
+        iters_per_round: 每轮训练的迭代次数
         lr: 学习率
         comp_domain: 计算域范围 (xmin, xmax, ymin, ymax, zmin, zmax)
         w_pde: PDE损失权重
@@ -909,42 +924,16 @@ def train_pinn(
     # 初始学习率
     last_lr = lr
     print(f"Initial learning rate: {last_lr}")
-
-    # 生成采样点
-    domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r = generate_collocation_points(
-        field, comp_domain=comp_domain
-    )
     
-    # 移动到设备
-    domain_r = domain_r.to(device)
-    far_boundary_r = far_boundary_r.to(device)
-    conductors_near_boundary_r = conductors_near_boundary_r.to(device)
-    
-    for i in range(len(conductors_boundary_list)):
-        points, is_grounded = conductors_boundary_list[i]
-        conductors_boundary_list[i] = (points.to(device), is_grounded)
-
-    # 远处边界点  ##################################
-    # 根据field设置的背景电场计算电势值
-    far_boundary_potential = torch.zeros(far_boundary_r.shape[0], 1, device=device)
-    for i in range(far_boundary_r.shape[0]):
-        point = far_boundary_r[i].cpu().numpy()
-        phi = torch.tensor(field.to_potential(point), dtype=torch.float32, device=device)
-        far_boundary_potential[i, 0] = phi
-    
-    # # 对于导体边界点，计算电势值（接地导体都是0）
-    # conductors_boundary_potential = torch.zeros(conductors_boundary_r.shape[0], 1, device=device)
-    
-    # 导体边界点  ##################################
-    # 创建孤立导体的可训练电势参数
+    # 对孤立导体 #######################
+    # 创建可训练电势参数
     isolated_potentials = []
-    for boundary_points, is_grounded in conductors_boundary_list:
-        if not is_grounded:
-            # 为每个孤立导体创建可训练参数
+    for conductor in field.conductors:
+        if not conductor["is_grounded"]:
             conductor_potential = torch.nn.Parameter(torch.zeros(1, device=device))
             isolated_potentials.append(conductor_potential)
     
-    # 对孤立导体，将电势参数添加到优化器中
+    # 添加电势参数到优化器
     if isolated_potentials:
         optimizer = torch.optim.Adam([
             {'params': model.parameters()},
@@ -957,68 +946,97 @@ def train_pinn(
     far_boundary_losses = []
     conductor_boundary_losses = []
     
-    # 训练循环
-    for epoch in range(n_epochs):
-        optimizer.zero_grad()
+    # 轮次训练循环
+    total_iters = 0
+    for round_idx in range(n_rounds):
+        print(f"Starting round {round_idx+1}/{n_rounds}")
         
-        # PDE损失 ( ∇²φ = 0 )
-        laplacian = model.laplacian(domain_r)
-        pde_loss = torch.mean(laplacian ** 2)
+        # 每轮开始时重新生成采样点
+        domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r = generate_collocation_points(
+            field, comp_domain=comp_domain
+        )
         
-        # 无穷远处边界条件损失
-        far_pred = model(far_boundary_r)
-        far_boundary_loss = torch.mean((far_pred - far_boundary_potential) ** 2)
+        # 移动到设备
+        domain_r = domain_r.to(device)
+        far_boundary_r = far_boundary_r.to(device)
+        conductors_near_boundary_r = conductors_near_boundary_r.to(device)
         
-        # 导体边界条件损失
-        conductor_boundary_loss = torch.tensor(0.0, device=device)
-        isolated_idx = 0
-        
-        for i, (conductor_points, is_grounded) in enumerate(conductors_boundary_list):
-            if conductor_points.shape[0] > 0:  # 有采样点时
-                # 导体表面点的电势
-                conductor_surf_phi_pred = model(conductor_points)
-                
-                if is_grounded:
-                    # 接地导体：电势为0
-                    target_phi = torch.zeros_like(conductor_surf_phi_pred)
-                    conductor_boundary_loss += torch.mean((conductor_surf_phi_pred - target_phi) ** 2)
-                else:
-                    # 孤立导体：等势
-                    potential = isolated_potentials[isolated_idx]
-                    target_phi = potential.expand_as(conductor_surf_phi_pred)
-                    conductor_boundary_loss += torch.mean((conductor_surf_phi_pred - target_phi) ** 2)
-                    isolated_idx += 1
+        for i in range(len(conductors_boundary_list)):
+            points, is_grounded = conductors_boundary_list[i]
+            conductors_boundary_list[i] = (points.to(device), is_grounded)
 
-                
-        # 总损失
-        loss = w_pde * pde_loss + w_far * far_boundary_loss + w_conductor * conductor_boundary_loss
+        # 无穷远处边界点  ##################################
+        # 根据field设置的背景电场计算电势值
+        far_boundary_potential = torch.zeros(far_boundary_r.shape[0], 1, device=device)
+        for i in range(far_boundary_r.shape[0]):
+            point = far_boundary_r[i].cpu().numpy()
+            phi = torch.tensor(field.to_potential(point), dtype=torch.float32, device=device)
+            far_boundary_potential[i, 0] = phi
         
-        # 反向传播
-        loss.backward()
+        # 每轮的迭代训练
+        for iter_idx in range(iters_per_round):
+            optimizer.zero_grad()
+            
+            # PDE损失 ( ∇²φ = 0 )
+            laplacian = model.laplacian(domain_r)
+            pde_loss = torch.mean(laplacian ** 2)
+            
+            # 无穷远处边界条件损失
+            far_pred = model(far_boundary_r)
+            far_boundary_loss = torch.mean((far_pred - far_boundary_potential) ** 2)
+            
+            # 导体边界条件损失
+            conductor_boundary_loss = torch.tensor(0.0, device=device)
+            isolated_idx = 0
+            
+            for i, (conductor_points, is_grounded) in enumerate(conductors_boundary_list):
+                if conductor_points.shape[0] > 0:  # 有采样点时
+                    # 导体表面点的电势
+                    conductor_surf_phi_pred = model(conductor_points)
+                    
+                    if is_grounded:
+                        # 接地导体：电势为0
+                        target_phi = torch.zeros_like(conductor_surf_phi_pred)
+                        conductor_boundary_loss += torch.mean((conductor_surf_phi_pred - target_phi) ** 2)
+                    else:
+                        # 孤立导体：等势
+                        potential = isolated_potentials[isolated_idx]
+                        target_phi = potential.expand_as(conductor_surf_phi_pred)
+                        conductor_boundary_loss += torch.mean((conductor_surf_phi_pred - target_phi) ** 2)
+                        isolated_idx += 1
+            
+            # 总损失
+            loss = w_pde * pde_loss + w_far * far_boundary_loss + w_conductor * conductor_boundary_loss
+            
+            # 反向传播
+            loss.backward()
+            
+            # 更新参数
+            optimizer.step()
+            
+            # 记录损失
+            losses.append(loss.item())
+            pde_losses.append(pde_loss.item())
+            far_boundary_losses.append(far_boundary_loss.item())
+            conductor_boundary_losses.append(conductor_boundary_loss.item())
+            
+            # 全局迭代计数
+            total_iters += 1
+            
+            # 训练进度
+            if (iter_idx + 1) % (iters_per_round // 5) == 0 or iter_idx == 0:
+                print(f"Round {round_idx+1}/{n_rounds}, Iter {iter_idx+1}/{iters_per_round}, "
+                      f"Loss: {loss.item():.6f}, PDE: {pde_loss.item():.6f}, "
+                      f"Far: {far_boundary_loss.item():.6f}, Conductor: {conductor_boundary_loss.item():.6f}")
         
-        # 更新参数
-        optimizer.step()
-        
-        # 更新学习率
+        # 每轮结束后更新学习率
         scheduler.step(loss)
-
+        
         # 检查并打印学习率变化
         current_lr = optimizer.param_groups[0]['lr']
         if current_lr != last_lr:
             print(f"Learning rate changed from {last_lr} to {current_lr}")
             last_lr = current_lr
-        
-        # 记录损失
-        losses.append(loss.item())
-        pde_losses.append(pde_loss.item())
-        far_boundary_losses.append(far_boundary_loss.item())
-        conductor_boundary_losses.append(conductor_boundary_loss.item())
-        
-        # 训练进度
-        if (epoch + 1) % (n_epochs // 20) == 0 or epoch == 0:
-            print(f"Epoch {epoch+1}/{n_epochs}, Loss: {loss.item():.6f}, "
-                  f"PDE: {pde_loss.item():.6f}, Far: {far_boundary_loss.item():.6f}, "
-                  f"Conductor: {conductor_boundary_loss.item():.6f}")
     
     # 记录field中孤立导体的电势值
     if isolated_potentials:
@@ -1030,7 +1048,6 @@ def train_pinn(
                 isolated_idx += 1
 
     return losses
-
 
 def visualize_results(
         model: ElectricPotentialNN,
@@ -1354,7 +1371,8 @@ def main():
     # 网络参数
     hidden_layers = [128, 128, 128, 128, 128, 128]
     learning_rate = 1e-3
-    n_epochs = 5000
+    n_rounds = 50
+    iters_per_round = 100
     
     # 不同部分损失权重
     w_pde = 1.0
@@ -1365,7 +1383,7 @@ def main():
     model = ElectricPotentialNN(input_dim=3, hidden_layers=hidden_layers).to(device)
 
     # 训练PINN模型
-    losses = train_pinn(model, field, n_epochs=n_epochs, lr=learning_rate, 
+    losses = train_pinn(model, field, n_rounds=n_rounds, iters_per_round=iters_per_round, lr=learning_rate,
                         comp_domain=(xmin, xmax, ymin, ymax, zmin, zmax),
                         w_pde=w_pde, w_far=w_far, w_conductor=w_conductor)
     
