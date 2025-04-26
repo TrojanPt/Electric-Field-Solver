@@ -16,7 +16,7 @@
 
 **Conductors Distribution**
 
-<img src="https://github.com/TrojanPt/Electric-Field-Solver/blob/901efc645fbb1d981ccf367fc38d66c81935a6b4/image/02/Conductors%20Distribution.png" width=500/>
+<img src="image/02/Conductors%20Distribution.png" width=500/>
 
 **output**
 
