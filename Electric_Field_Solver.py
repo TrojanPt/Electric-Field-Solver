@@ -1,5 +1,5 @@
 '''
-利用PyTorch神经网络内嵌拉普拉斯方程实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
+利用PyTorch神经网络内嵌拉普拉斯方程 ∇²φ = 0 实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
 
 requirements:
     torch==2.6.0+cu126
@@ -62,33 +62,32 @@ class ElectricPotentialNN(nn.Module):
         Returns:
             torch.Tensor: 拉普拉斯算子值 (N, 1)
         """
-        # 确保需要计算梯度
         r.requires_grad_(True)
         
-        # 计算电势
-        u = self.forward(r)
+        # 电势 φ
+        phi = self.forward(r)
         
-        # 创建一个与输出相同大小的单位张量
-        ones = torch.ones_like(u)
+        # 记录 φ 的形状
+        ones = torch.ones_like(phi)
         
-        # 计算一阶导数
-        du_dr = torch.autograd.grad(
-            u, r, 
+        # 一阶导数 ∇φ
+        dphi_dr = torch.autograd.grad(
+            phi, r, 
             grad_outputs=ones, 
             create_graph=True, 
             retain_graph=True
         )[0]
         
-        # 分别计算二阶导数
+        # 二阶导数 ∇²φ = ∆φ = ∂²φ/∂x² + ∂²φ/∂y² + ∂²φ/∂z²
         laplacian = 0
         for i in range(r.shape[1]):
-            d2u_dri2 = torch.autograd.grad(
-                du_dr[:, i], r, 
-                grad_outputs=torch.ones_like(du_dr[:, i]),
+            d2phi_dri2 = torch.autograd.grad(
+                dphi_dr[:, i], r, 
+                grad_outputs=torch.ones_like(dphi_dr[:, i]),
                 create_graph=True,
                 retain_graph=True
             )[0][:, i]
-            laplacian += d2u_dri2
+            laplacian += d2phi_dri2
         
         return laplacian.unsqueeze(1)
 
@@ -102,22 +101,21 @@ class ElectricPotentialNN(nn.Module):
         Returns:
             torch.Tensor: 电场向量
         """
-        # 确保需要计算梯度
         r.requires_grad_(True)
         
-        # 计算电势
-        u = self.forward(r)
+        # 电势 φ
+        phi = self.forward(r)
         
-        # 计算电势对坐标的梯度
-        grad_outputs = torch.ones_like(u)
+        # ∇φ = (∂φ/∂x, ∂φ/∂y, ∂φ/∂z)
+        grad_outputs = torch.ones_like(phi)
         gradient = torch.autograd.grad(
-            u, r, 
+            phi, r, 
             grad_outputs=grad_outputs,
             create_graph=True,
             retain_graph=True
         )[0]
         
-        # 电场是电势的负梯度
+        # E = -∇φ
         electric_field = -gradient
         
         return electric_field
@@ -203,7 +201,7 @@ class Field:
         x, y, z = point
         E_x, E_y, E_z = self.electric_field
         
-        # 电势 φ = -E * r
+        # 匀强电场，电势 φ = -E * r
         phi = -(E_x * x + E_y * y + E_z * z)
         
         return phi
@@ -372,7 +370,7 @@ class Field:
             tuple: 计算区域的边界坐标 (xmin, xmax, ymin, ymax, zmin, zmax)
         '''
         if not self.conductors:
-            # 如果没有导体，返回默认计算域
+            # 若无导体，返回默认计算域
             return (-10, 10, -10, 10, -10, 10)
         
         # 记录所有导体中心点坐标和线度
@@ -573,13 +571,14 @@ def set_field() -> Field:
     return field
 
 
-def generate_collocation_points(field: Field, 
-                                n_domain:int = 30000, 
-                                n_far_boundary:int = 6000, 
-                                n_boundary_per_conductor:int = 1000, 
-                                n_near_boundary_per_conductor:int = 1000,
-                                comp_domain: tuple = (-10, 10, -10, 10, -10, 10)
-                                ) -> tuple[torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, bool]], torch.Tensor]:
+def generate_collocation_points(
+        field: Field, 
+        n_domain:int = 30000, 
+        n_far_boundary:int = 6000, 
+        n_boundary_per_conductor:int = 1000, 
+        n_near_boundary_per_conductor:int = 1000,
+        comp_domain: tuple = (-10, 10, -10, 10, -10, 10)
+        ) -> tuple[torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, bool]], torch.Tensor]:
     """
     生成用于训练的采样点
     
@@ -695,7 +694,7 @@ def generate_collocation_points(field: Field,
             center = torch.tensor(conductor["center"])
             radius = conductor["radius"]
             
-            # 生成球面上的均匀分布点
+            # 生成球面上的点，随机取点并遵循均匀分布 ##############################################
             theta = torch.acos(2 * torch.rand(n_boundary_per_conductor) - 1)
             phi = 2 * np.pi * torch.rand(n_boundary_per_conductor)
             
@@ -708,7 +707,7 @@ def generate_collocation_points(field: Field,
             # 存储边界点和导体接地信息
             conductors_boundary_list.append((sphere_boundary, conductor["is_grounded"]))
             
-            # 生成球体附近的点
+            # 生成球体附近的点 ##############################################
             
             near_radius = radius * (1 + 0.05)  # 增加5%的半径
             
@@ -725,7 +724,7 @@ def generate_collocation_points(field: Field,
             height = conductor["height"]
             half_height = height / 2
             
-            # 生成圆柱体表面的点
+            # 生成圆柱体表面的点 ##############################################
             n_side = int(0.7 * n_boundary_per_conductor)  # 侧面
             n_caps = n_boundary_per_conductor - n_side    # 顶面和底面
             
@@ -765,7 +764,7 @@ def generate_collocation_points(field: Field,
             # 存储边界点和导体接地信息
             conductors_boundary_list.append((cylinder_boundary, conductor["is_grounded"]))
             
-            # 生成圆柱体附近的点
+            # 生成圆柱体附近的点 ##############################################
 
             # 侧面附近点
             near_radius = radius * (1 + 0.05)  # 增加5%的半径
@@ -790,6 +789,8 @@ def generate_collocation_points(field: Field,
             center = torch.tensor(conductor["center"])
             a, b, c = conductor["dimensions"]
             half_a, half_b, half_c = a/2, b/2, c/2
+
+            # 生成立方体表面的点 ##############################################
             
             # 每个面上生成点的数量
             points_per_face_cube = n_boundary_per_conductor // 6
@@ -832,7 +833,7 @@ def generate_collocation_points(field: Field,
             # 存储边界点和导体接地信息
             conductors_boundary_list.append((cube_boundary, conductor["is_grounded"]))
             
-            # 生成立方体附近的点
+            # 生成立方体附近的点 ##############################################
             near_faces = []
             
             # 为每个面生成近边界点
@@ -875,12 +876,16 @@ def generate_collocation_points(field: Field,
     return domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r
 
 
-def train_pinn(model: ElectricPotentialNN,
-               field: Field,
-               n_epochs:int = 10000, 
-               lr:int = 0.001, 
-               comp_domain:tuple = (-10, 10, -10, 10, -10, 10)
-               ) -> list:
+def train_pinn(
+        model: ElectricPotentialNN,
+        field: Field,
+        n_epochs:int = 10000, 
+        lr:int = 0.001, 
+        comp_domain:tuple = (-10, 10, -10, 10, -10, 10),
+        w_pde: float = 1.0,
+        w_far: float = 10.0,
+        w_conductor: float = 10.0
+        ) -> list:
     """
     PINN模型的训练函数
     
@@ -890,6 +895,9 @@ def train_pinn(model: ElectricPotentialNN,
         n_epochs: 训练迭代次数
         lr: 学习率
         comp_domain: 计算域范围 (xmin, xmax, ymin, ymax, zmin, zmax)
+        w_pde: PDE损失权重
+        w_far: 极远处边界损失权重
+        w_conductor: 导体边界损失权重
     
     Returns:
         list: losses 损失函数历史
@@ -953,7 +961,7 @@ def train_pinn(model: ElectricPotentialNN,
     for epoch in range(n_epochs):
         optimizer.zero_grad()
         
-        # PDE损失 ( \nabla ^ 2 \phi = 0 )
+        # PDE损失 ( ∇²φ = 0 )
         laplacian = model.laplacian(domain_r)
         pde_loss = torch.mean(laplacian ** 2)
         
@@ -983,13 +991,6 @@ def train_pinn(model: ElectricPotentialNN,
 
                 
         # 总损失
-        ##############################################
-        ## 不同部分损失的权重
-        ##############################################
-        w_pde = 1.0
-        w_far = 10.0
-        w_conductor = 10.0
-        
         loss = w_pde * pde_loss + w_far * far_boundary_loss + w_conductor * conductor_boundary_loss
         
         # 反向传播
@@ -1350,16 +1351,23 @@ def main():
     xmin, xmax, ymin, ymax, zmin, zmax = field.determine_comp_domain()
     print(f"计算域范围: ({xmin}, {xmax}, {ymin}, {ymax}, {zmin}, {zmax})")
     
-    # 参数设置
-    hidden_layers = [128, 128, 128, 128, 128, 128]  # 隐藏层结构
+    # 网络参数
+    hidden_layers = [128, 128, 128, 128, 128, 128]
     learning_rate = 1e-3
     n_epochs = 5000
+    
+    # 不同部分损失权重
+    w_pde = 1.0
+    w_far = 10.0
+    w_conductor = 10.0
 
     # 创建PINN模型
     model = ElectricPotentialNN(input_dim=3, hidden_layers=hidden_layers).to(device)
 
     # 训练PINN模型
-    losses = train_pinn(model, field, n_epochs=n_epochs, lr=learning_rate, comp_domain=(xmin, xmax, ymin, ymax, zmin, zmax))
+    losses = train_pinn(model, field, n_epochs=n_epochs, lr=learning_rate, 
+                        comp_domain=(xmin, xmax, ymin, ymax, zmin, zmax),
+                        w_pde=w_pde, w_far=w_far, w_conductor=w_conductor)
     
     # 训练损失图
     plt.figure(figsize=(10, 6))
