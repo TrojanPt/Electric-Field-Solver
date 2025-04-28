@@ -20,6 +20,9 @@ import torch.nn as nn
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
+# 设置物理常数
+epsilon_0 = 1.0
+
 
 class ElectricPotentialNN(nn.Module):
     def __init__(self, input_dim = 3, hidden_layers = [64, 64, 64, 64]):
@@ -60,7 +63,7 @@ class ElectricPotentialNN(nn.Module):
         Args:
             r: 输入张量 (N, input_dim)
         Returns:
-            torch.Tensor: 拉普拉斯算子值 (N, 1)
+            torch.Tensor: 拉普拉斯算子值 ∇²φ (N, 1)
         """
         r.requires_grad_(True)
         
@@ -122,13 +125,23 @@ class ElectricPotentialNN(nn.Module):
 
 
 class Field:
+    def __init__(self, dim=3):
+        self.dim = dim
+        self.electric_field = [0.0] * dim
+
+        self.conductors = []  # 存储所有导体
+        self.add_electrical_conductor = self.ConductorAdder(self)
+
+        self.charged_bodies = []  # 存储所有带电体
+        self.add_charged_body = self.ChargedBodyAdder(self)
+    
     class ConductorAdder:
         def __init__(self, field):
             self.field = field
         
         def cylinder(self, center: tuple, radius: float, height: float, is_grounded: bool = True):
             """
-            添加圆柱体电导体
+            添加圆柱体导体
             
             Args:
                 center: 圆柱体中心坐标，形如 (x, y, z)
@@ -148,7 +161,7 @@ class Field:
         
         def sphere(self, center: tuple, radius, is_grounded: bool = True):
             """
-            添加球体电导体
+            添加球形导体
             
             Args:
                 center: 球体中心坐标，形如 (x, y, z)
@@ -166,7 +179,7 @@ class Field:
         
         def cube(self, center: tuple, a, b, c, is_grounded: bool = True):
             """
-            添加立方体电导体
+            添加立方体导体
             
             Args:
                 center: 立方体中心坐标，形如 (x, y, z)
@@ -182,12 +195,27 @@ class Field:
             })
             return self.field
     
-    def __init__(self, dim=3):
-        self.dim = dim
-        self.electric_field = [0.0] * dim
-        self.conductors = []  # 存储所有电导体
-        self.add_electrical_conductor = self.ConductorAdder(self)
-    
+    class ChargedBodyAdder:
+        def __init__(self, field):
+            self.field = field
+        
+        def sphere(self, center: tuple, radius: float, density: float):
+            """
+            添加带电球体
+            
+            Args:
+                center: 球体中心坐标，形如 (x, y, z)
+                radius: 球体半径
+                density: 球体的电荷密度
+            """
+            self.field.charged_bodies.append({
+                "shape": "sphere",
+                "center": center,
+                "radius": radius,
+                "density": density,
+            })
+            return self.field
+
     def add_electric_field(self, E_x, E_y, E_z):
         """
         添加匀强电场
@@ -206,9 +234,9 @@ class Field:
         
         return phi
 
-    def is_inside(self, point) -> bool:
+    def is_inside_conductor(self, point) -> bool:
         """
-        判断点是否在任何电导体内
+        判断点是否在任何导体内
         """
         x, y, z = point
         
@@ -253,17 +281,42 @@ class Field:
         
         return False
     
-    # not used in the current code
-    def is_nearby(self, point, rel_tolerance = 0.01) -> bool:
+    def is_inside_charged_body(self, point) -> float:
         """
-        判断点是否在任何电导体附近
+        判断点是否在任何带电体内
+        Args:
+            point(tuple): 点坐标 (x, y, z)
+
+        Returns:
+            float: 如果在带电体内，返回电荷密度，否则返回0.0
+        """
+        x, y, z = point
+        
+        for charged_body in self.charged_bodies:
+            if charged_body["shape"] == "sphere":
+                # 球体判断
+                cx, cy, cz = charged_body["center"]
+                r = charged_body["radius"]
+                
+                # 计算点到球心的距离
+                distance = ((x - cx) ** 2 + (y - cy) ** 2 + (z - cz) ** 2) ** 0.5
+                
+                if distance <= r:
+                    return charged_body["density"]
+        
+        return 0.0
+
+    # not used in the current code
+    def is_nearby_conductor(self, point, rel_tolerance = 0.01) -> bool:
+        """
+        判断点是否在任何导体附近
 
         Args:
             point: 点坐标
-            rel_tolerance: 相对电导体线度的容差范围，电导体线度 l 可取为该电导体形状的入参的几何平均，例如cube则取 l = (a*b*c)^(1/3)，则 tolerance = rel_tolerance * l
+            rel_tolerance: 相对导体线度的容差范围，导体线度 l 可取为该导体形状的入参的几何平均，例如cube则取 l = (a*b*c)^(1/3)，则 tolerance = rel_tolerance * l
 
         Returns:
-            bool: 点到电导体的距离是否小于tolerance，如果是则返回True，否则返回False
+            bool: 点到导体的距离是否小于tolerance，如果是则返回True，否则返回False
         """
         x, y, z = point
     
@@ -274,7 +327,7 @@ class Field:
                 r = conductor["radius"]
                 h = conductor["height"]
                 
-                # 电导体线度，取几何平均
+                # 导体线度，取几何平均
                 l = (2 * r * h) ** (1/2)
                 tolerance = rel_tolerance * l
                 
@@ -359,21 +412,21 @@ class Field:
 
     def determine_comp_domain(self, rel_infinite_distance = 2) -> tuple:
         '''
-        根据导体分布确定矩形区域，后续计算将认为该计算区域的边界近似为无穷远处
+        根据导体/带电体分布确定矩形区域，后续计算将认为该计算区域的边界近似为无穷远处
         
         Args:
-            rel_infinite_distance: 相对导体分布与导体线度的无穷远处的距离，电导体线度 l 可取为该电导体形状的入参的几何平均，例如cube则取 l = (a*b*c)^(1/3)
+            rel_infinite_distance: 相对导体分布与导体线度的无穷远处的距离，导体线度 l 可取为该导体形状的入参的几何平均，例如cube则取 l = (a*b*c)^(1/3)
                                     则任何导体中心到该区域边界的距离都大于 rel_infinite_distance * l_max
                                     其中 l_max 为所有导体的线度中的最大值
         
         Returns:
             tuple: 计算区域的边界坐标 (xmin, xmax, ymin, ymax, zmin, zmax)
         '''
-        if not self.conductors:
-            # 若无导体，返回默认计算域
+        if not self.conductors and not self.charged_bodies:
+            # 若无导体和带电体，返回默认计算域
             return (-10, 10, -10, 10, -10, 10)
         
-        # 记录所有导体中心点坐标和线度
+        # 记录所有导体和带电体中心点坐标和线度
         centers = []
         linscales = []
         
@@ -392,9 +445,19 @@ class Field:
                 l = (a * b * c) ** (1/3)
             
             linscales.append(l)
+
+        for charged_body in self.charged_bodies:
+            centers.append(charged_body["center"])
+            
+            if charged_body["shape"] == "sphere":
+                r = charged_body["radius"]
+                l = 2 * r
+            
+            linscales.append(l)
         
         # 最大线度
         l_max = max(linscales)
+        l_max = max(l_max, 10) 
         
         # 计算所有中心点的坐标范围
         min_x = min(c[0] for c in centers)
@@ -418,7 +481,7 @@ class Field:
     
     def visualize(self):
         """
-        电导体分布图
+        导体及带电体分布图
         """
         fig = plt.figure(figsize=(10, 8))
         ax = fig.add_subplot(111, projection='3d')
@@ -426,7 +489,7 @@ class Field:
         # 确定边界
         min_x, max_x, min_y, max_y, min_z, max_z = self.determine_comp_domain()
         
-        # 电导体
+        # 导体
         for conductor in self.conductors:
             if conductor["shape"] == "cylinder":
                 self.visualize_cylinder(ax, conductor)
@@ -434,12 +497,17 @@ class Field:
                 self.visualize_sphere(ax, conductor)
             elif conductor["shape"] == "cube":
                 self.visualize_cube(ax, conductor)
+
+        # 带电体
+        for body in self.charged_bodies:
+            if body["shape"] == "sphere":
+                self.visualize_sphere(ax, body, is_charged_body=True)
         
         # 设置轴标签和标题
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('Z')
-        ax.set_title('Conductors Distribution')
+        ax.set_title('The distribution of conductors(b) and charged bodies(r)')
         
         # 设置轴范围
         ax.set_xlim([min_x, max_x])
@@ -453,8 +521,9 @@ class Field:
         
         plt.tight_layout()
         plt.show()
+        # plt.savefig("conductors_and_charged_bodies.png")
 
-    def visualize_cylinder(self, ax, conductor):
+    def visualize_cylinder(self, ax: Axes3D, conductor):
         """可视化圆柱体"""
         cx, cy, cz = conductor["center"]
         radius = conductor["radius"]
@@ -477,10 +546,10 @@ class Field:
         for i in range(0, 100, 10):
             ax.plot([x[i], x[i]], [y[i], y[i]], [bottom_z, top_z], 'b-')
 
-    def visualize_sphere(self, ax, conductor):
+    def visualize_sphere(self, ax: Axes3D, body, is_charged_body=False):
         """可视化球体"""
-        cx, cy, cz = conductor["center"]
-        radius = conductor["radius"]
+        cx, cy, cz = body["center"]
+        radius = body["radius"]
         
         # 用u, v参数化球体表面
         u = np.linspace(0, 2*np.pi, 20)
@@ -490,10 +559,9 @@ class Field:
         y = cy + radius * np.outer(np.sin(u), np.sin(v))
         z = cz + radius * np.outer(np.ones(np.size(u)), np.cos(v))
         
-        # 绘制球体
-        ax.plot_surface(x, y, z, color='g', alpha=0.5)
+        ax.plot_surface(x, y, z, color='b' if not is_charged_body else 'r', alpha=0.5)
 
-    def visualize_cube(self, ax, conductor):
+    def visualize_cube(self, ax: Axes3D, conductor):
         """可视化立方体"""
         cx, cy, cz = conductor["center"]
         a, b, c = conductor["dimensions"]
@@ -526,46 +594,65 @@ class Field:
                 [vertices[edge[0]][0], vertices[edge[1]][0]],
                 [vertices[edge[0]][1], vertices[edge[1]][1]],
                 [vertices[edge[0]][2], vertices[edge[1]][2]],
-                'r-'
+                'b-'
             )
 
 
 def set_field() -> Field:
     """
-    设置电场和电导体
+    设置电场和导体
     """
     field = Field()
     
-    # 添加电场
-    E_x = input("请输入电场的x分量: ")
-    E_y = input("请输入电场的y分量: ")
-    E_z = input("请输入电场的z分量: ")
-    field.add_electric_field(float(E_x), float(E_y), float(E_z))
+    # 添加匀强电场或带电体
+    flag = input("Set up a uniform background electric field or charged bodies? (electric field/charged body): ").strip().lower()
+    # 匀强电场
+    if flag == "electric field":
+        print("Set up uniform electric field( V/m )")
+        E_x = input("E_x = ")
+        E_y = input("E_y = ")
+        E_z = input("E_z = ")
+        field.add_electric_field(float(E_x), float(E_y), float(E_z))
+    # 带电体
+    elif flag == "charged body":
+        print("Set up charged body")
+        # 添加带电体，目前仅支持球体(sphere)
+        while True:
+            print("Add charged body, currently only support sphere")
+            shape = input("Please input the shape of the charged body (sphere) or 'exit' to quit: ").strip().lower()
+            if shape == "exit":
+                break
+
+            center = tuple(map(float, input("the center coordinates of the sphere (x, y, z): ").split(',')))
+            radius = float(input("the radius of the sphere: "))
+            density = float(input("the charge density of the sphere: "))
+            field.add_charged_body.sphere(center, radius, density)
     
-    # 添加电导体，目前仅支持圆柱体(cylinder)、球体(sphere)和立方体(cube)
+    # 添加导体，目前仅支持圆柱体(cylinder)、球体(sphere)和立方体(cube)
     while True:
-        shape = input("添加电导体，目前仅支持圆柱体(cylinder)、球体(sphere)和立方体(cube)\n请输入电导体的形状 (cylinder/sphere/cube) 或 'exit' 退出: ")
+        print("Add electrical conductor, currently only support cylinder, sphere and cube")
+        shape = input("Please input the shape of the conductor (cylinder/sphere/cube) or 'exit' to quit: ").strip().lower()
         if shape == "exit":
             break
 
         # 导体类型
-        conductor_type = input("请选择导体的类型 (grounded/isolated): ").strip().lower()
+        conductor_type = input("Please select the type of conductor (grounded/isolated): ").strip().lower()
         is_grounded = True if conductor_type == "grounded" else False
 
         if shape == "cylinder":
-            center = tuple(map(float, input("请输入圆柱体中心坐标 (x, y, z): ").split(',')))
-            radius = float(input("请输入圆柱体半径: "))
-            height = float(input("请输入圆柱体高度: "))
+            center = tuple(map(float, input("the center coordinates of the cylinder (x, y, z): ").split(',')))
+            radius = float(input("the radius of the cylinder: "))
+            height = float(input("the height of the cylinder: "))
             field.add_electrical_conductor.cylinder(center, radius, height, is_grounded)
         elif shape == "sphere":
-            center = tuple(map(float, input("请输入球体中心坐标 (x, y, z): ").split(',')))
-            radius = float(input("请输入球体半径: "))
+            center = tuple(map(float, input("the center coordinates of the sphere (x, y, z): ").split(',')))
+            radius = float(input("the radius of the sphere: "))
             field.add_electrical_conductor.sphere(center, radius, is_grounded)
         elif shape == "cube":
-            center = tuple(map(float, input("请输入立方体中心坐标 (x, y, z): ").split(',')))
-            a = float(input("请输入立方体的长: "))
-            b = float(input("请输入立方体的宽: "))
-            c = float(input("请输入立方体的高: "))
+            center = tuple(map(float, input("the center coordinates of the cube (x, y, z): ").split(',')))
+            a = float(input("the length of the cube: "))
+            b = float(input("the width of the cube: "))
+            c = float(input("the height of the cube: "))
             field.add_electrical_conductor.cube(center, a, b, c, is_grounded)
     
     return field
@@ -576,36 +663,38 @@ def generate_collocation_points(
         n_domain:int = 30000, 
         n_far_boundary:int = 6000, 
         n_boundary_per_conductor:int = 1000, 
-        n_near_boundary_per_conductor:int = 1000,
+        n_density_charged_body: int = 100,
         comp_domain: tuple = (-10, 10, -10, 10, -10, 10)
-        ) -> tuple[torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, bool]], torch.Tensor]:
+        ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, bool]], torch.Tensor, list[tuple[torch.Tensor, float]]]:
     """
-    生成用于训练的采样点
+    生成用于训练的采样点。
     
     Args:
         field(Field): 电场与导体设置
         n_domain: 区域内部采样点数量
-        n_far_boundary: 空间极远处的边界采样点数量
-        n_boundary_per_conductor: 每个电导体的边界采样点数量
-        n_near_boundary_per_conductor: 每个电导体的近边界采样点数量
+        n_far_boundary: 空间极远处的边界采样点数量（若不存在背景电场，则不采样）
+        n_boundary_per_conductor: 每个导体的边界采样点(及近边界采样点)数量
+        n_density_charged_body: 带电体的采样点数密度
         comp_domain: 计算域范围 (xmin, xmax, ymin, ymax, zmin, zmax)
     
     Returns:
-        tuple: (domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r)
+        tuple: (domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list)
 
             `domain_r`(torch.Tensor): 区域内部的采样点
 
-            `far_boundary_r`(torch.Tensor): 空间极远处的边界采样点
+            `far_boundary_r`(torch.Tensor | None): 空间极远处的边界采样点
 
-            `conductors_boundary_list`(list): 每个电导体的边界点列表，格式为[(points, is_grounded), ...]
+            `conductors_boundary_list`(list): 每个导体的边界点列表，格式为[(points, is_grounded), ...]
 
-            `conductors_near_boundary_r`(torch.Tensor): 每个电导体的近边界采样点
+            `conductors_near_boundary_r`(torch.Tensor): 每个导体的近边界采样点
+
+            `charged_bodies_list`(list): 每个带电体的采样点列表，格式为[(points, density), ...]
     """
     xmin, xmax, ymin, ymax, zmin, zmax = comp_domain
     
     # 1. 生成区域内部的点 ##################################
 
-    # 创建足够多的点以保证n_domain个点在所有电导体外部
+    # 创建足够多的点以保证n_domain个点在所有导体外部
     n_extra = int(n_domain * 0.5)  # 额外生成，弥补可能被导体占用的点
     
     x = torch.FloatTensor(n_domain + n_extra, 1).uniform_(xmin, xmax)
@@ -615,11 +704,12 @@ def generate_collocation_points(
     # 合并坐标
     domain_points = torch.cat([x, y, z], dim=1)
     
-    # 过滤出不在电导体内部的点
+    # 过滤出不在导体及带电体内部的点
     valid_points = []
     for i in range(domain_points.shape[0]):
         point = domain_points[i].tolist()
-        if not field.is_inside(point):
+        if not field.is_inside_conductor(point) and field.is_inside_charged_body(point) == 0.0:
+            # 如果点不在导体和带电体内部，则添加到有效点列表中
             valid_points.append(domain_points[i])
         if len(valid_points) >= n_domain:
             break
@@ -634,57 +724,62 @@ def generate_collocation_points(
         
         for i in range(extra_points.shape[0]):
             point = extra_points[i].tolist()
-            if not field.is_inside(point):
+            if not field.is_inside_conductor(point) and field.is_inside_charged_body(point) == 0.0:
                 valid_points.append(extra_points[i])
             if len(valid_points) >= n_domain:
                 break
     
     domain_r = torch.stack(valid_points[:n_domain])
     
-    # 2. 生成远处边界上的点 ##################################
-
-    # 生成六个面上的点，每个面上取 n_far_boundary/6 个点
-    points_per_face = n_far_boundary // 6
+    # 2. 若存在背景电场，则生成远处边界上的点 ##################################
+    if field.electric_field != [0.0, 0.0, 0.0]:
+            
+        # 生成六个面上的点，每个面上取 n_far_boundary/6 个点
+        points_per_face = n_far_boundary // 6
+        
+        # xmin面
+        x_min = torch.full((points_per_face, 1), xmin)
+        y_min_face = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
+        z_min_face = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
+        face1 = torch.cat([x_min, y_min_face, z_min_face], dim=1)
+        
+        # xmax面
+        x_max = torch.full((points_per_face, 1), xmax)
+        y_max_face = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
+        z_max_face = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
+        face2 = torch.cat([x_max, y_max_face, z_max_face], dim=1)
+        
+        # ymin面
+        x_y_min = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
+        y_min = torch.full((points_per_face, 1), ymin)
+        z_y_min = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
+        face3 = torch.cat([x_y_min, y_min, z_y_min], dim=1)
+        
+        # ymax面
+        x_y_max = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
+        y_max = torch.full((points_per_face, 1), ymax)
+        z_y_max = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
+        face4 = torch.cat([x_y_max, y_max, z_y_max], dim=1)
+        
+        # zmin面
+        x_z_min = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
+        y_z_min = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
+        z_min = torch.full((points_per_face, 1), zmin)
+        face5 = torch.cat([x_z_min, y_z_min, z_min], dim=1)
+        
+        # zmax面
+        x_z_max = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
+        y_z_max = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
+        z_max = torch.full((points_per_face, 1), zmax)
+        face6 = torch.cat([x_z_max, y_z_max, z_max], dim=1)
+        
+        far_boundary_r = torch.cat([face1, face2, face3, face4, face5, face6], dim=0)
     
-    # xmin面
-    x_min = torch.full((points_per_face, 1), xmin)
-    y_min_face = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
-    z_min_face = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
-    face1 = torch.cat([x_min, y_min_face, z_min_face], dim=1)
+    else:
+        # 如果没有背景电场，则不生成远处边界点
+        far_boundary_r = None
     
-    # xmax面
-    x_max = torch.full((points_per_face, 1), xmax)
-    y_max_face = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
-    z_max_face = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
-    face2 = torch.cat([x_max, y_max_face, z_max_face], dim=1)
-    
-    # ymin面
-    x_y_min = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
-    y_min = torch.full((points_per_face, 1), ymin)
-    z_y_min = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
-    face3 = torch.cat([x_y_min, y_min, z_y_min], dim=1)
-    
-    # ymax面
-    x_y_max = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
-    y_max = torch.full((points_per_face, 1), ymax)
-    z_y_max = torch.FloatTensor(points_per_face, 1).uniform_(zmin, zmax)
-    face4 = torch.cat([x_y_max, y_max, z_y_max], dim=1)
-    
-    # zmin面
-    x_z_min = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
-    y_z_min = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
-    z_min = torch.full((points_per_face, 1), zmin)
-    face5 = torch.cat([x_z_min, y_z_min, z_min], dim=1)
-    
-    # zmax面
-    x_z_max = torch.FloatTensor(points_per_face, 1).uniform_(xmin, xmax)
-    y_z_max = torch.FloatTensor(points_per_face, 1).uniform_(ymin, ymax)
-    z_max = torch.full((points_per_face, 1), zmax)
-    face6 = torch.cat([x_z_max, y_z_max, z_max], dim=1)
-    
-    far_boundary_r = torch.cat([face1, face2, face3, face4, face5, face6], dim=0)
-    
-    # 3. 为每个电导体生成边界点 ##################################
+    # 3. 为每个导体生成边界点 ##################################
 
     conductors_boundary_list = []
     conductors_near_boundary_r = []
@@ -885,8 +980,32 @@ def generate_collocation_points(
         conductors_near_boundary_r = torch.cat(conductors_near_boundary_r, dim=0)
     else:
         conductors_near_boundary_r = torch.zeros((0, 3))
+
+    # 4. 在每个带电体内部生成采样点 ##################################
+    charged_bodies_list = []
+    for charged_body in field.charged_bodies:
+        if charged_body["shape"] == "sphere":
+            volume = (4/3) * np.pi * charged_body["radius"] ** 3
+            # 根据体积计算采样点数量
+            n_charged_body = max(int(n_density_charged_body * volume), 1000)  # 至少1000个点 
+            center = torch.tensor(charged_body["center"])
+            radius = charged_body["radius"]
+            
+            # 生成球体内部的点
+            r = radius * torch.rand(n_charged_body) 
+            theta = torch.acos(2 * torch.rand(n_charged_body) - 1)
+            phi = 2 * np.pi * torch.rand(n_charged_body)
+            
+            x = center[0] + r * torch.sin(theta) * torch.cos(phi)
+            y = center[1] + r * torch.sin(theta) * torch.sin(phi)
+            z = center[2] + r * torch.cos(theta)
+            
+            sphere_inside_points = torch.stack([x, y, z], dim=1)
+            
+            # 存储带电体的采样点和电荷密度
+            charged_bodies_list.append((sphere_inside_points, charged_body["density"]))
     
-    return domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r
+    return domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list
 
 
 def train_pinn(
@@ -897,6 +1016,7 @@ def train_pinn(
         lr: float = 0.001, 
         comp_domain: tuple = (-10, 10, -10, 10, -10, 10),
         w_pde: float = 1.0,
+        w_pde_charged: float = 10.0,
         w_far: float = 10.0,
         w_conductor: float = 10.0
         ) -> list:
@@ -910,7 +1030,8 @@ def train_pinn(
         iters_per_round: 每轮训练的迭代次数
         lr: 学习率
         comp_domain: 计算域范围 (xmin, xmax, ymin, ymax, zmin, zmax)
-        w_pde: PDE损失权重
+        w_pde: PDE损失权重(无带电体处)
+        w_pde_charged: PDE损失权重(带电体处)
         w_far: 极远处边界损失权重
         w_conductor: 导体边界损失权重
     
@@ -945,6 +1066,7 @@ def train_pinn(
     pde_losses = []
     far_boundary_losses = []
     conductor_boundary_losses = []
+    charged_body_losses = []
     
     # 轮次训练循环
     total_iters = 0
@@ -952,38 +1074,61 @@ def train_pinn(
         print(f"Starting round {round_idx+1}/{n_rounds}")
         
         # 每轮开始时重新生成采样点
-        domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r = generate_collocation_points(
+        domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list = generate_collocation_points(
             field, comp_domain=comp_domain
         )
         
         # 移动到设备
         domain_r = domain_r.to(device)
-        far_boundary_r = far_boundary_r.to(device)
         conductors_near_boundary_r = conductors_near_boundary_r.to(device)
         
         for i in range(len(conductors_boundary_list)):
             points, is_grounded = conductors_boundary_list[i]
             conductors_boundary_list[i] = (points.to(device), is_grounded)
 
-        # 无穷远处边界点  ##################################
-        # 根据field设置的背景电场计算电势值
-        far_boundary_potential = torch.zeros(far_boundary_r.shape[0], 1, device=device)
-        for i in range(far_boundary_r.shape[0]):
-            point = far_boundary_r[i].cpu().numpy()
-            phi = torch.tensor(field.to_potential(point), dtype=torch.float32, device=device)
-            far_boundary_potential[i, 0] = phi
+        for i in range(len(charged_bodies_list)):
+            points, density = charged_bodies_list[i]
+            charged_bodies_list[i] = (points.to(device), density)
+
+        # 若存在背景电场，则生成远处边界上的点
+        if far_boundary_r is not None:
+            far_boundary_r = far_boundary_r.to(device)
+            # 无穷远处边界点  ##################################
+            # 根据field设置的背景电场计算电势值
+            far_boundary_potential = torch.zeros(far_boundary_r.shape[0], 1, device=device)
+            for i in range(far_boundary_r.shape[0]):
+                point = far_boundary_r[i].cpu().numpy()
+                phi = torch.tensor(field.to_potential(point), dtype=torch.float32, device=device)
+                far_boundary_potential[i, 0] = phi
         
         # 每轮的迭代训练
         for iter_idx in range(iters_per_round):
             optimizer.zero_grad()
             
-            # PDE损失 ( ∇²φ = 0 )
-            laplacian = model.laplacian(domain_r)
-            pde_loss = torch.mean(laplacian ** 2)
+            # PDE损失
+
+            pde_loss = [torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)] # [无带电体, 带电体]
             
-            # 无穷远处边界条件损失
-            far_pred = model(far_boundary_r)
-            far_boundary_loss = torch.mean((far_pred - far_boundary_potential) ** 2)
+            # 对无带电体处 ∇²φ = 0
+            laplacian = model.laplacian(domain_r)
+            pde_loss[0] = torch.mean(laplacian ** 2)
+            
+            # 对带电体处 ∇²φ = -ρ/ε₀
+            for points, density in charged_bodies_list:
+                if points.shape[0] > 0:  # 有采样点时
+                    # 计算电势的拉普拉斯
+                    laplacian = model.laplacian(points)
+                    
+                    charge_density = density / epsilon_0
+                    
+                    pde_loss[1] += torch.mean((laplacian + charge_density) ** 2)
+            
+            # 若存在背景电场，则计算远处边界损失
+            if far_boundary_r is not None:
+                far_pred = model(far_boundary_r)
+                far_boundary_loss = torch.mean((far_pred - far_boundary_potential) ** 2)
+            else:
+                far_boundary_loss = torch.tensor(0.0, device=device)
             
             # 导体边界条件损失
             conductor_boundary_loss = torch.tensor(0.0, device=device)
@@ -1006,7 +1151,8 @@ def train_pinn(
                         isolated_idx += 1
             
             # 总损失
-            loss = w_pde * pde_loss + w_far * far_boundary_loss + w_conductor * conductor_boundary_loss
+            loss = (w_pde * pde_loss[0] + w_far * far_boundary_loss +
+                w_conductor * conductor_boundary_loss + w_pde_charged * pde_loss[1])
             
             # 反向传播
             loss.backward()
@@ -1016,7 +1162,7 @@ def train_pinn(
             
             # 记录损失
             losses.append(loss.item())
-            pde_losses.append(pde_loss.item())
+            pde_losses.append((pde_loss[0].item(), pde_loss[1].item()))
             far_boundary_losses.append(far_boundary_loss.item())
             conductor_boundary_losses.append(conductor_boundary_loss.item())
             
@@ -1024,9 +1170,10 @@ def train_pinn(
             total_iters += 1
             
             # 训练进度
-            if (iter_idx + 1) % (iters_per_round // 5) == 0 or iter_idx == 0:
+            if (iter_idx + 1) % (max(1, iters_per_round // 5)) == 0 or iter_idx == 0:
                 print(f"Round {round_idx+1}/{n_rounds}, Iter {iter_idx+1}/{iters_per_round}, "
-                      f"Loss: {loss.item():.6f}, PDE: {pde_loss.item():.6f}, "
+                      f"Loss: {loss.item():.6f} "
+                      f"PDE: Vacuum: {pde_loss[0].item():.6f}, Charged: {pde_loss[1].item():.6f} "
                       f"Far: {far_boundary_loss.item():.6f}, Conductor: {conductor_boundary_loss.item():.6f}")
         
         # 每轮结束后更新学习率
@@ -1093,7 +1240,7 @@ def visualize_results(
     # 过滤导体内部的点
     valid_points = []
     for point in points:
-        if not field.is_inside(point):
+        if not field.is_inside_conductor(point):
             valid_points.append(point)
     
     if valid_points:
@@ -1111,7 +1258,7 @@ def visualize_results(
                E_field[:, 0], E_field[:, 1], E_field[:, 2],
                length=0.5, normalize=False, color='b', alpha=0.8, linewidths=0.5)
     
-    # 添加电导体
+    # 添加导体
     for conductor in field.conductors:
         if conductor["shape"] == "cylinder":
             field.visualize_cylinder(ax1, conductor)
@@ -1119,6 +1266,10 @@ def visualize_results(
             field.visualize_sphere(ax1, conductor)
         elif conductor["shape"] == "cube":
             field.visualize_cube(ax1, conductor)
+    # 添加带电体
+    for charged_body in field.charged_bodies:
+        if charged_body["shape"] == "sphere":
+            field.visualize_sphere(ax1, charged_body, is_charged_body=True)
     
     ax1.set_xlabel('X')
     ax1.set_ylabel('Y')
@@ -1145,7 +1296,7 @@ def visualize_results(
         batch_points = xy_points[i:i+batch_size]
         
         # 过滤导体内部
-        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside(point)]
+        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside_conductor(point)]
         
         if valid_indices:
             valid_batch = batch_points[valid_indices]
@@ -1173,7 +1324,7 @@ def visualize_results(
             half_h = h / 2
             
             if cz - half_h <= z_val <= cz + half_h:
-                circle = plt.Circle((cx, cy), r, fill=False, color='red')
+                circle = plt.Circle((cx, cy), r, fill=False, color='blue')
                 ax2.add_patch(circle)
         
         elif conductor["shape"] == "sphere":
@@ -1184,7 +1335,7 @@ def visualize_results(
             z_diff = abs(z_val - cz)
             if z_diff <= r:
                 circle_r = (r**2 - z_diff**2)**0.5
-                circle = plt.Circle((cx, cy), circle_r, fill=False, color='red')
+                circle = plt.Circle((cx, cy), circle_r, fill=False, color='blue')
                 ax2.add_patch(circle)
         
         elif conductor["shape"] == "cube":
@@ -1193,8 +1344,21 @@ def visualize_results(
             half_a, half_b, half_c = a/2, b/2, c/2
             
             if cz - half_c <= z_val <= cz + half_c:
-                rect = plt.Rectangle((cx - half_a, cy - half_b), a, b, fill=False, color='red')
+                rect = plt.Rectangle((cx - half_a, cy - half_b), a, b, fill=False, color='blue')
                 ax2.add_patch(rect)
+    
+    # 标记带电体的xy截面
+    for charged_body in field.charged_bodies:
+        if charged_body["shape"] == "sphere":
+            cx, cy, cz = charged_body["center"]
+            r = charged_body["radius"]
+            
+            # 计算在z=z_val平面上的圆的半径
+            z_diff = abs(z_val - cz)
+            if z_diff <= r:
+                circle_r = (r**2 - z_diff**2)**0.5
+                circle = plt.Circle((cx, cy), circle_r, fill=False, color='red')
+                ax2.add_patch(circle)
     
     ax2.set_xlabel('X')
     ax2.set_ylabel('Y')
@@ -1218,7 +1382,7 @@ def visualize_results(
     # 分批处理
     for i in range(0, xz_points.shape[0], batch_size):
         batch_points = xz_points[i:i+batch_size]
-        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside(point)]
+        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside_conductor(point)]
         
         if valid_indices:
             valid_batch = batch_points[valid_indices]
@@ -1250,7 +1414,7 @@ def visualize_results(
             if y_diff <= r:
                 # 矩形截面
                 rect_width = 2 * (r**2 - y_diff**2)**0.5
-                rect = plt.Rectangle((cx - rect_width/2, cz - half_h), rect_width, h, fill=False, color='red')
+                rect = plt.Rectangle((cx - rect_width/2, cz - half_h), rect_width, h, fill=False, color='blue')
                 ax3.add_patch(rect)
         
         elif conductor["shape"] == "sphere":
@@ -1261,7 +1425,7 @@ def visualize_results(
             y_diff = abs(y_val - cy)
             if y_diff <= r:
                 circle_r = (r**2 - y_diff**2)**0.5
-                circle = plt.Circle((cx, cz), circle_r, fill=False, color='red')
+                circle = plt.Circle((cx, cz), circle_r, fill=False, color='blue')
                 ax3.add_patch(circle)
         
         elif conductor["shape"] == "cube":
@@ -1270,8 +1434,21 @@ def visualize_results(
             half_a, half_b, half_c = a/2, b/2, c/2
             
             if cy - half_b <= y_val <= cy + half_b:
-                rect = plt.Rectangle((cx - half_a, cz - half_c), a, c, fill=False, color='red')
+                rect = plt.Rectangle((cx - half_a, cz - half_c), a, c, fill=False, color='blue')
                 ax3.add_patch(rect)
+
+    # 标记带电体的xz截面
+    for charged_body in field.charged_bodies:
+        if charged_body["shape"] == "sphere":
+            cx, cy, cz = charged_body["center"]
+            r = charged_body["radius"]
+            
+            # 在y=y_val平面上的圆半径
+            y_diff = abs(y_val - cy)
+            if y_diff <= r:
+                circle_r = (r**2 - y_diff**2)**0.5
+                circle = plt.Circle((cx, cz), circle_r, fill=False, color='red')
+                ax3.add_patch(circle)
     
     ax3.set_xlabel('X')
     ax3.set_ylabel('Z')
@@ -1295,7 +1472,7 @@ def visualize_results(
     # 分批处理
     for i in range(0, yz_points.shape[0], batch_size):
         batch_points = yz_points[i:i+batch_size]
-        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside(point)]
+        valid_indices = [j for j, point in enumerate(batch_points) if not field.is_inside_conductor(point)]
         
         if valid_indices:
             valid_batch = batch_points[valid_indices]
@@ -1327,7 +1504,7 @@ def visualize_results(
             if x_diff <= r:
                 # 矩形截面
                 rect_width = 2 * (r**2 - x_diff**2)**0.5
-                rect = plt.Rectangle((cy - rect_width/2, cz - half_h), rect_width, h, fill=False, color='red')
+                rect = plt.Rectangle((cy - rect_width/2, cz - half_h), rect_width, h, fill=False, color='blue')
                 ax4.add_patch(rect)
         
         elif conductor["shape"] == "sphere":
@@ -1338,7 +1515,7 @@ def visualize_results(
             x_diff = abs(x_val - cx)
             if x_diff <= r:
                 circle_r = (r**2 - x_diff**2)**0.5
-                circle = plt.Circle((cy, cz), circle_r, fill=False, color='red')
+                circle = plt.Circle((cy, cz), circle_r, fill=False, color='blue')
                 ax4.add_patch(circle)
         
         elif conductor["shape"] == "cube":
@@ -1347,8 +1524,21 @@ def visualize_results(
             half_a, half_b, half_c = a/2, b/2, c/2
             
             if cx - half_a <= x_val <= cx + half_a:
-                rect = plt.Rectangle((cy - half_b, cz - half_c), b, c, fill=False, color='red')
+                rect = plt.Rectangle((cy - half_b, cz - half_c), b, c, fill=False, color='blue')
                 ax4.add_patch(rect)
+
+    # 标记带电体的yz截面
+    for charged_body in field.charged_bodies:
+        if charged_body["shape"] == "sphere":
+            cx, cy, cz = charged_body["center"]
+            r = charged_body["radius"]
+            
+            # 在x=x_val平面上的圆半径
+            x_diff = abs(x_val - cx)
+            if x_diff <= r:
+                circle_r = (r**2 - x_diff**2)**0.5
+                circle = plt.Circle((cy, cz), circle_r, fill=False, color='red')
+                ax4.add_patch(circle)
     
     ax4.set_xlabel('Y')
     ax4.set_ylabel('Z')
@@ -1357,25 +1547,28 @@ def visualize_results(
     
     plt.tight_layout()
     plt.show()
+    # plt.savefig('electric_field_results.png')
     
 
 def main():
+
     # 设置电场和导体
     field = set_field()
     field.visualize()
 
     # 区域范围
     xmin, xmax, ymin, ymax, zmin, zmax = field.determine_comp_domain()
-    print(f"计算域范围: ({xmin}, {xmax}, {ymin}, {ymax}, {zmin}, {zmax})")
+    print(f'Computation domain: ({xmin}, {xmax}, {ymin}, {ymax}, {zmin}, {zmax})')
     
     # 网络参数
     hidden_layers = [128, 128, 128, 128, 128, 128]
     learning_rate = 1e-3
-    n_rounds = 50
+    n_rounds = 10
     iters_per_round = 100
     
     # 不同部分损失权重
     w_pde = 1.0
+    w_pde_charged = 10.0
     w_far = 10.0
     w_conductor = 10.0
 
@@ -1385,7 +1578,8 @@ def main():
     # 训练PINN模型
     losses = train_pinn(model, field, n_rounds=n_rounds, iters_per_round=iters_per_round, lr=learning_rate,
                         comp_domain=(xmin, xmax, ymin, ymax, zmin, zmax),
-                        w_pde=w_pde, w_far=w_far, w_conductor=w_conductor)
+                        w_pde=w_pde, w_pde_charged=w_pde_charged,
+                        w_far=w_far, w_conductor=w_conductor)
     
     # 训练损失图
     plt.figure(figsize=(10, 6))
@@ -1395,6 +1589,7 @@ def main():
     plt.ylabel('Loss')
     plt.grid(True)
     plt.show()
+    # plt.savefig('training_loss_history.png')
 
     # 结果可视化
     visualize_results(model, field, comp_domain=(xmin, xmax, ymin, ymax, zmin, zmax))
