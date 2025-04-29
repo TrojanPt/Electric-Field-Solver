@@ -1,34 +1,31 @@
 # Electric-Field-Solver
 
-利用PyTorch神经网络内嵌拉普拉斯方程实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
+利用PyTorch神经网络内嵌泊松方程 $$\nabla^2\varphi = -\frac{\rho}{\varepsilon_0}$$ 实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
 
 > [!note]
 > 这只是一个练习。
+> 
 > 由于该模型需要针对用户输入进行训练，因此并没有任何实际用处。
 
-### **样例输入**
+### **Sample1**
 
-**Input**
+**Electric Field Distribution**
 
-<img src="image\02\Input.png" width=500/>
-
-### **样例输出**
-
-**Conductors Distribution**
-
-<img src="image/02/Conductors%20Distribution.png" width=500/>
-
-**output**
-
-<img src="image\02\Output.png" width=500/>
+<img src="image\07\electric_field_results.png" width=500/>
 
 **Training Loss History**
 
-<img src="image\02\Training Loss History.png" width=500/>
+<img src="image\07\training_loss_history.png" width=500/>
 
-**Electric Field**
+### **Sample2**
 
-<img src="image\02\Electric Field.png" width=500/>
+**Electric Field Distribution**
+
+<img src="image\05\electric_field_distribution.png" width=500/>
+
+**Training Loss History**
+
+<img src="image\05\training_loss_history.png" width=500/>
 
 ### **requirements**
 > torch==2.6.0+cu126
