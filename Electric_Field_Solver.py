@@ -1,5 +1,5 @@
 '''
-利用PyTorch神经网络内嵌拉普拉斯方程 ∇²φ = 0 实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
+利用PyTorch神经网络内嵌泊松方程 ∇²φ = -ρ/ε₀ 实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
 
 requirements:
     torch==2.6.0+cu126
@@ -25,15 +25,17 @@ epsilon_0 = 1.0
 
 
 class ElectricPotentialNN(nn.Module):
-    def __init__(self, input_dim = 3, hidden_layers = [64, 64, 64, 64]):
+    def __init__(self, input_dim = 3, hidden_layers = [64, 64, 64, 64], init_scale=0.1):
         '''
         初始化电势神经网络模型
         Args:
             input_dim(int, default = 3): 输入维度
             hidden_layers(list, default = [64, 64, 64, 64]): 隐藏层神经元数量
+            init_scale(float, default = 0.1): 输出层权重缩放因子
         '''
         super().__init__()
 
+        self.init_scale = init_scale
         layers = []
 
         pre_layer_dim = input_dim
@@ -46,6 +48,25 @@ class ElectricPotentialNN(nn.Module):
         layers.append(nn.Linear(pre_layer_dim, output_dim))
 
         self.network = nn.Sequential(*layers)
+
+        # 初始化权重
+        self._init_weights()
+        
+    def _init_weights(self):
+        """初始化权重"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # 对于隐藏层，使用Kaiming初始化
+                if m.out_features != 1:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity="leaky_relu")
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
+                # 对于输出层，使用缩放的初始化以获得更平滑的初始场
+                else:
+                    nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity="leaky_relu")
+                    m.weight.data.mul_(self.init_scale)
+                    if m.bias is not None:
+                        nn.init.zeros_(m.bias)
 
     def forward(self, r) -> torch.Tensor:
         '''
@@ -665,7 +686,7 @@ def generate_collocation_points(
         n_boundary_per_conductor:int = 1000, 
         n_density_charged_body: int = 100,
         comp_domain: tuple = (-10, 10, -10, 10, -10, 10)
-        ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, bool]], torch.Tensor, list[tuple[torch.Tensor, float]]]:
+        ) -> tuple[torch.Tensor, torch.Tensor | None, list[tuple[torch.Tensor, bool]], torch.Tensor | None, list[tuple[torch.Tensor, float]], torch.Tensor | None]:
     """
     生成用于训练的采样点。
     
@@ -674,11 +695,11 @@ def generate_collocation_points(
         n_domain: 区域内部采样点数量
         n_far_boundary: 空间极远处的边界采样点数量（若不存在背景电场，则不采样）
         n_boundary_per_conductor: 每个导体的边界采样点(及近边界采样点)数量
-        n_density_charged_body: 带电体的采样点数密度
+        n_density_charged_body: 带电体内部（及近边界）的采样点数密度
         comp_domain: 计算域范围 (xmin, xmax, ymin, ymax, zmin, zmax)
     
     Returns:
-        tuple: (domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list)
+        tuple: (domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list, charged_bodies_near_boundary_r)
 
             `domain_r`(torch.Tensor): 区域内部的采样点
 
@@ -686,9 +707,11 @@ def generate_collocation_points(
 
             `conductors_boundary_list`(list): 每个导体的边界点列表，格式为[(points, is_grounded), ...]
 
-            `conductors_near_boundary_r`(torch.Tensor): 每个导体的近边界采样点
+            `conductors_near_boundary_r`(torch.Tensor | None): 每个导体的近边界采样点
 
             `charged_bodies_list`(list): 每个带电体的采样点列表，格式为[(points, density), ...]
+
+            `charged_bodies_near_boundary_r`(torch.Tensor | None): 每个带电体的近边界采样点
     """
     xmin, xmax, ymin, ymax, zmin, zmax = comp_domain
     
@@ -979,10 +1002,11 @@ def generate_collocation_points(
     if conductors_near_boundary_r:
         conductors_near_boundary_r = torch.cat(conductors_near_boundary_r, dim=0)
     else:
-        conductors_near_boundary_r = torch.zeros((0, 3))
+        conductors_near_boundary_r = None
 
     # 4. 在每个带电体内部生成采样点 ##################################
     charged_bodies_list = []
+    charged_bodies_near_boundary_r = []
     for charged_body in field.charged_bodies:
         if charged_body["shape"] == "sphere":
             volume = (4/3) * np.pi * charged_body["radius"] ** 3
@@ -992,7 +1016,7 @@ def generate_collocation_points(
             radius = charged_body["radius"]
             
             # 生成球体内部的点
-            r = radius * torch.rand(n_charged_body) 
+            r = radius * (torch.rand(n_charged_body)**(1/3))  # 立方根分布以保证均匀分布
             theta = torch.acos(2 * torch.rand(n_charged_body) - 1)
             phi = 2 * np.pi * torch.rand(n_charged_body)
             
@@ -1004,8 +1028,30 @@ def generate_collocation_points(
             
             # 存储带电体的采样点和电荷密度
             charged_bodies_list.append((sphere_inside_points, charged_body["density"]))
+
+            # 生成球体附近的点 ##############################################
+            # 随机的扩展系数 0.01-0.05
+            near_factors = torch.FloatTensor(n_charged_body).uniform_(0.01, 0.05)
+            near_radius = radius * (1 + near_factors)
+
+            x_near = center[0] + near_radius * torch.sin(theta) * torch.cos(phi)
+            y_near = center[1] + near_radius * torch.sin(theta) * torch.sin(phi)
+            z_near = center[2] + near_radius * torch.cos(theta)
+
+            sphere_near_boundary = torch.stack([x_near, y_near, z_near], dim=1)
+            charged_bodies_near_boundary_r.append(sphere_near_boundary)
     
-    return domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list
+    # 将所有带电体近边界点合并
+    if charged_bodies_near_boundary_r:
+        charged_bodies_near_boundary_r = torch.cat(charged_bodies_near_boundary_r, dim=0)
+    else:
+        charged_bodies_near_boundary_r = None
+
+    return (
+        domain_r, far_boundary_r, 
+        conductors_boundary_list, conductors_near_boundary_r, 
+        charged_bodies_list, charged_bodies_near_boundary_r
+        )
 
 
 def train_pinn(
@@ -1066,7 +1112,6 @@ def train_pinn(
     pde_losses = []
     far_boundary_losses = []
     conductor_boundary_losses = []
-    charged_body_losses = []
     
     # 轮次训练循环
     total_iters = 0
@@ -1074,13 +1119,14 @@ def train_pinn(
         print(f"Starting round {round_idx+1}/{n_rounds}")
         
         # 每轮开始时重新生成采样点
-        domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list = generate_collocation_points(
+        domain_r, far_boundary_r, conductors_boundary_list, conductors_near_boundary_r, charged_bodies_list, charged_bodies_near_boundary_r = generate_collocation_points(
             field, comp_domain=comp_domain
         )
         
         # 移动到设备
         domain_r = domain_r.to(device)
-        conductors_near_boundary_r = conductors_near_boundary_r.to(device)
+        conductors_near_boundary_r = conductors_near_boundary_r.to(device) if conductors_near_boundary_r is not None else None
+        charged_bodies_near_boundary_r = charged_bodies_near_boundary_r.to(device) if charged_bodies_near_boundary_r is not None else None
         
         for i in range(len(conductors_boundary_list)):
             points, is_grounded = conductors_boundary_list[i]
@@ -1112,6 +1158,14 @@ def train_pinn(
             # 对无带电体处 ∇²φ = 0
             laplacian = model.laplacian(domain_r)
             pde_loss[0] = torch.mean(laplacian ** 2)
+            # 对导体近边界处 ∇²φ = 0
+            if conductors_near_boundary_r is not None:
+                laplacian = model.laplacian(conductors_near_boundary_r)
+                pde_loss[0] += torch.mean(laplacian ** 2)
+            # # 对带电体近边界处 ∇²φ = 0
+            if charged_bodies_near_boundary_r is not None:
+                laplacian = model.laplacian(charged_bodies_near_boundary_r)
+                pde_loss[0] += torch.mean(laplacian ** 2)
             
             # 对带电体处 ∇²φ = -ρ/ε₀
             for points, density in charged_bodies_list:
@@ -1562,6 +1616,7 @@ def main():
     
     # 网络参数
     hidden_layers = [128, 128, 128, 128, 128, 128]
+    init_scale = 1.0
     learning_rate = 1e-3
     n_rounds = 10
     iters_per_round = 100
@@ -1573,7 +1628,7 @@ def main():
     w_conductor = 10.0
 
     # 创建PINN模型
-    model = ElectricPotentialNN(input_dim=3, hidden_layers=hidden_layers).to(device)
+    model = ElectricPotentialNN(input_dim=3, hidden_layers=hidden_layers, init_scale=init_scale).to(device)
 
     # 训练PINN模型
     losses = train_pinn(model, field, n_rounds=n_rounds, iters_per_round=iters_per_round, lr=learning_rate,
