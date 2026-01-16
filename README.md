@@ -1,6 +1,6 @@
 # Electric-Field-Solver
 
-利用PyTorch神经网络内嵌泊松方程 $$\nabla^2\varphi = -\frac{\rho}{\varepsilon_0}$$ 实现PINN(Physics-Informed Neural Networks)求解三维静电场问题。
+利用PyTorch神经网络内嵌泊松方程 $$\nabla^2\varphi = -\frac{\rho}{\varepsilon_0}$$ 实现求解三维静电场问题。
 
 > [!note]
 > 这只是一个练习。
